@@ -1,0 +1,360 @@
+<style>
+*{box-sizing:border-box}
+h2.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+body{margin:0;background:#fff}
+.sim{background:#fff;padding:0;font-family:sans-serif}
+.ti-header{background:#C8102E;padding:10px 16px;display:flex;align-items:center;justify-content:space-between}
+.ti-title{color:#fff;font-size:14px;font-weight:500;margin:0}
+.ti-sub{color:#ffaaaa;font-size:10px}
+.canvas-wrap{position:relative;background:#fff;border:1.5px solid #C8102E;margin:0}
+canvas{display:block}
+.phase-strip{background:#FCEAEA;border-top:1px solid #C8102E;padding:8px 16px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.ph-badge{padding:4px 10px;border-radius:12px;font-size:11px;font-weight:500;border:1px solid #C8102E;color:#C8102E;background:#fff;transition:background .3s,color .3s}
+.ph-badge.active{background:#C8102E;color:#fff}
+.info-bar{background:#fff;border-top:1px solid #FCEAEA;padding:8px 16px;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.metric{display:flex;flex-direction:column;min-width:80px}
+.metric-label{font-size:9px;color:#A00C24;text-transform:uppercase;letter-spacing:.5px}
+.metric-val{font-size:14px;font-weight:500;color:#C8102E}
+.ctrl-bar{padding:8px 16px;display:flex;gap:8px;align-items:center;border-top:1px solid #FCEAEA}
+.ctrl-bar button{font-size:12px;padding:5px 14px;border-radius:4px;border:1px solid #C8102E;background:transparent;color:#C8102E;cursor:pointer}
+.ctrl-bar button:hover{background:#FCEAEA}
+.ctrl-bar button.primary{background:#C8102E;color:#fff}
+.ctrl-bar button.primary:hover{background:#A00C24}
+.speed-label{font-size:12px;color:#A00C24;margin-left:8px}
+</style>
+
+<div class="sim">
+<h2 class="sr-only">Animated Texas Instruments style simulation of the solar panel cleaning robot showing signal flow, efficiency readings, and all three cleaning phases from power-on to completion.</h2>
+<div class="ti-header">
+  <div><p class="ti-title">Solar panel cleaning robot — live simulation</p></div>
+  <span class="ti-sub">Texas Instruments MSP430 / Arduino UNO</span>
+</div>
+<div class="canvas-wrap">
+  <canvas id="c" width="678" height="340"></canvas>
+</div>
+<div class="phase-strip">
+  <span style="font-size:11px;color:#A00C24;font-weight:500">Phase:</span>
+  <div class="ph-badge active" id="ph0">Boot</div>
+  <div class="ph-badge" id="ph1">Health check</div>
+  <div class="ph-badge" id="ph2">Overall check</div>
+  <div class="ph-badge" id="ph3">Dry sweep</div>
+  <div class="ph-badge" id="ph4">Wet clean</div>
+  <div class="ph-badge" id="ph5">Dead cell diag</div>
+  <div class="ph-badge" id="ph6">Done</div>
+</div>
+<div class="info-bar">
+  <div class="metric"><span class="metric-label">Efficiency</span><span class="metric-val" id="m-eff">—</span></div>
+  <div class="metric"><span class="metric-label">Voltage</span><span class="metric-val" id="m-v">—</span></div>
+  <div class="metric"><span class="metric-label">Current</span><span class="metric-val" id="m-i">—</span></div>
+  <div class="metric"><span class="metric-label">Temp delta</span><span class="metric-val" id="m-t">—</span></div>
+  <div class="metric"><span class="metric-label">Zone</span><span class="metric-val" id="m-z">—</span></div>
+  <div class="metric"><span class="metric-label">Pump</span><span class="metric-val" id="m-p">OFF</span></div>
+  <div style="margin-left:auto;font-size:12px;color:#C8102E" id="status-msg">Send START to begin</div>
+</div>
+<div class="ctrl-bar">
+  <button class="primary" id="btn-play" onclick="playPause()">Play</button>
+  <button onclick="resetSim()">Reset</button>
+  <span class="speed-label">Speed</span>
+  <input type="range" min="1" max="5" value="3" step="1" id="spd" style="width:80px">
+  <span style="font-size:11px;color:#A00C24;margin-left:4px" id="frame-ctr"></span>
+</div>
+</div>
+
+<script>
+const cv=document.getElementById('c');
+const ctx=cv.getContext('2d');
+const W=678,H=340;
+const RED='#C8102E',LRED='#FCEAEA',DRED='#A00C24',GR='#888';
+
+const BLOCKS={
+  batt:   {x:20, y:30,  w:80, h:36, label:'Batteries', sub:'7.4V'},
+  ina:    {x:20, y:98,  w:80, h:36, label:'INA219',    sub:'V/I'},
+  mlx:    {x:20, y:154, w:80, h:36, label:'MLX90614',  sub:'IR temp'},
+  bh:     {x:20, y:210, w:80, h:36, label:'BH1750',    sub:'lux'},
+  tcrt:   {x:20, y:266, w:80, h:36, label:'TCRT5000',  sub:'reflect'},
+  edge:   {x:20, y:295, w:80, h:30, label:'IR edge',   sub:'L+R'},
+  mcu:    {x:260,y:122, w:158,h:96, label:'MCU',       sub:'Arduino/MSP430'},
+  l293:   {x:510,y:98,  w:80, h:36, label:'L293D',     sub:'driver'},
+  motors: {x:510,y:154, w:80, h:36, label:'4× DC',     sub:'motors'},
+  pump:   {x:510,y:210, w:80, h:36, label:'5V pump',   sub:'relay D8'},
+  panel:  {x:260,y:260, w:158,h:60, label:'Solar panel', sub:'6 zones'},
+};
+
+function cx(b){return b.x+b.w/2}
+function cy(b){return b.y+b.h/2}
+function right(b){return b.x+b.w}
+function bottom(b){return b.y+b.h}
+
+const PULSES=[];
+let frame=0,playing=false,timer=null;
+let robotX=0,robotPhase=0;
+let zoneColors=Array(6).fill('#fff');
+let effVal='—',vVal='—',iVal='—',tVal='—',zVal='—',pumpOn=false;
+let statusMsg='Send START to begin';
+let activePhase=0;
+
+const ZONE_W=158/6;
+
+const TIMELINE=[
+  {f:0,   phase:0, act:'boot',    msg:'Powering on — initialising sensors...'},
+  {f:18,  phase:1, act:'health',  msg:'Health check: INA219 + MLX90614'},
+  {f:36,  phase:2, act:'p1',      msg:'Phase 1: overall efficiency check (8 samples)'},
+  {f:60,  phase:2, act:'p1done',  msg:'Phase 1: Eff=71% < 90% — cleaning needed'},
+  {f:80,  phase:3, act:'sweep0',  msg:'Phase 2: Zone 0 — dry sweep + mapping'},
+  {f:100, phase:3, act:'sweep1',  msg:'Phase 2: Zone 1 — Eff=82% dusty'},
+  {f:120, phase:3, act:'sweep2',  msg:'Phase 2: Zone 2 — Eff=61% dirty'},
+  {f:140, phase:3, act:'sweep3',  msg:'Phase 2: Zone 3 — Eff=91% clean'},
+  {f:160, phase:3, act:'sweep4',  msg:'Phase 2: Zone 4 — Eff=77% dusty'},
+  {f:180, phase:3, act:'sweep5',  msg:'Phase 2: Zone 5 — Eff=92% clean'},
+  {f:200, phase:3, act:'postdry', msg:'Post-dry check: Eff=79% — wet clean needed'},
+  {f:220, phase:4, act:'wet2',    msg:'Phase 3: Wet clean zone 2 (61%)'},
+  {f:260, phase:4, act:'wet2done',msg:'Zone 2 post-wet: Eff=72% — diagnose...'},
+  {f:280, phase:5, act:'diag',    msg:'Dead cell diagnosis: waiting 3s surface dry'},
+  {f:320, phase:5, act:'diagdone',msg:'Temp delta=+11°C — DEAD CELL detected!'},
+  {f:350, phase:4, act:'wet4',    msg:'Phase 3: Wet clean zone 4 (77%)'},
+  {f:390, phase:4, act:'wet4done',msg:'Zone 4 post-wet: Eff=91% — clean!'},
+  {f:410, phase:6, act:'done',    msg:'All zones resolved. Robot idle.'},
+];
+
+const ZONE_EFF=[96,82,61,91,77,92];
+const ZONE_POST=[96,89,72,91,91,92];
+const ZONE_COLORS_INIT=['#EAF3DE','#FAEEDA','#FAECE7','#EAF3DE','#FAEEDA','#EAF3DE'];
+const ZONE_COLORS_FINAL=['#EAF3DE','#EAF3DE','#FCEBEB','#EAF3DE','#EAF3DE','#EAF3DE'];
+
+function lerp(a,b,t){return a+(b-a)*t}
+
+function addPulse(from,to,color,label){
+  PULSES.push({fx:cx(from),fy:cy(from),tx:cx(to),ty:cy(to),t:0,color:color||RED,label:label||''});
+}
+
+function getSpeed(){return [120,80,50,30,15][parseInt(document.getElementById('spd').value)-1];}
+
+function drawBlock(b,fill,stroke,textColor,subColor){
+  ctx.fillStyle=fill||'#fff';
+  ctx.strokeStyle=stroke||RED;
+  ctx.lineWidth=1;
+  roundRect(ctx,b.x,b.y,b.w,b.h,4);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle=textColor||DRED;
+  ctx.font='500 10px sans-serif';
+  ctx.textAlign='center';
+  ctx.fillText(b.label,cx(b),b.y+14);
+  ctx.fillStyle=subColor||GR;
+  ctx.font='9px sans-serif';
+  ctx.fillText(b.sub,cx(b),b.y+27);
+}
+
+function roundRect(c,x,y,w,h,r){
+  c.beginPath();c.moveTo(x+r,y);c.lineTo(x+w-r,y);c.quadraticCurveTo(x+w,y,x+w,y+r);
+  c.lineTo(x+w,y+h-r);c.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  c.lineTo(x+r,y+h);c.quadraticCurveTo(x,y+h,x,y+h-r);
+  c.lineTo(x,y+r);c.quadraticCurveTo(x,y,x+r,y);c.closePath();
+}
+
+function drawArrow(x1,y1,x2,y2,color){
+  ctx.strokeStyle=color||RED;ctx.lineWidth=0.8;
+  ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+  const a=Math.atan2(y2-y1,x2-x1);
+  ctx.fillStyle=color||RED;
+  ctx.beginPath();ctx.moveTo(x2,y2);
+  ctx.lineTo(x2-7*Math.cos(a-0.4),y2-7*Math.sin(a-0.4));
+  ctx.lineTo(x2-7*Math.cos(a+0.4),y2-7*Math.sin(a+0.4));
+  ctx.closePath();ctx.fill();
+}
+
+function drawZones(){
+  const p=BLOCKS.panel;
+  for(let z=0;z<6;z++){
+    const zx=p.x+z*ZONE_W;
+    ctx.fillStyle=zoneColors[z];
+    ctx.fillRect(zx,p.y,ZONE_W,p.h);
+    ctx.strokeStyle=RED;ctx.lineWidth=0.5;
+    ctx.strokeRect(zx,p.y,ZONE_W,p.h);
+    ctx.fillStyle=DRED;ctx.font='9px sans-serif';ctx.textAlign='center';
+    ctx.fillText('Z'+z,zx+ZONE_W/2,p.y+15);
+    if(ZONE_EFF[z]){
+      ctx.fillStyle='#666';ctx.font='9px sans-serif';
+      ctx.fillText(ZONE_EFF[z]+'%',zx+ZONE_W/2,p.y+30);
+    }
+  }
+  ctx.strokeStyle=RED;ctx.lineWidth=1;
+  roundRect(ctx,p.x,p.y,p.w,p.h,3);ctx.stroke();
+  ctx.fillStyle=DRED;ctx.font='500 10px sans-serif';ctx.textAlign='left';
+  ctx.fillText(p.label,p.x+4,p.y-6);
+
+  const rx2=p.x+robotX;
+  const ry2=p.y-22;
+  ctx.fillStyle=RED;
+  roundRect(ctx,rx2-10,ry2-10,20,18,3);ctx.fill();
+  ctx.fillStyle='#fff';ctx.font='500 9px sans-serif';ctx.textAlign='center';
+  ctx.fillText('R',rx2,ry2+2);
+  if(pumpOn){
+    ctx.fillStyle='#1D9E75';ctx.beginPath();ctx.arc(rx2,ry2-14,5,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#fff';ctx.font='7px sans-serif';ctx.textAlign='center';ctx.fillText('W',rx2,ry2-13);
+  }
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);
+
+  ctx.strokeStyle='#FCEAEA';ctx.lineWidth=0.5;
+  for(let y=0;y<H;y+=20){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+
+  drawBlock(BLOCKS.batt, LRED,RED,DRED,'#C8102E');
+  const senFill=activePhase>=1?RED:LRED;
+  const senTxt=activePhase>=1?'#fff':'#A00C24';
+  drawBlock(BLOCKS.ina,  activePhase>=1?RED:LRED, RED, senTxt, activePhase>=1?'#ffcccc':'#C8102E');
+  drawBlock(BLOCKS.mlx,  activePhase>=1?RED:LRED, RED, senTxt, activePhase>=1?'#ffcccc':'#C8102E');
+  drawBlock(BLOCKS.bh,   activePhase>=2?RED:LRED, RED, senTxt, activePhase>=2?'#ffcccc':'#C8102E');
+  drawBlock(BLOCKS.tcrt, activePhase>=3?RED:LRED, RED, activePhase>=3?'#fff':'#A00C24', activePhase>=3?'#ffcccc':'#C8102E');
+  drawBlock(BLOCKS.edge, LRED, RED, DRED, '#C8102E');
+
+  const mcuF=activePhase>=1?RED:LRED;
+  const mcuT=activePhase>=1?'#fff':DRED;
+  ctx.fillStyle=mcuF;ctx.strokeStyle=RED;ctx.lineWidth=1.5;
+  roundRect(ctx,BLOCKS.mcu.x,BLOCKS.mcu.y,BLOCKS.mcu.w,BLOCKS.mcu.h,6);ctx.fill();ctx.stroke();
+  ctx.fillStyle=mcuT;ctx.font='500 12px sans-serif';ctx.textAlign='center';
+  ctx.fillText('Arduino UNO',cx(BLOCKS.mcu),BLOCKS.mcu.y+22);
+  ctx.font='9px sans-serif';ctx.fillStyle=activePhase>=1?'#ffcccc':'#888';
+  ctx.fillText('MSP430',cx(BLOCKS.mcu),BLOCKS.mcu.y+38);
+  ctx.fillStyle=activePhase>=1?'#ffdddd':'#bbb';
+  ctx.font='9px sans-serif';
+  const stateLabels=['Idle','Health','P1 scan','P2 sweep','P3 wet','Dead cell','Done'];
+  ctx.fillText(stateLabels[activePhase]||'—',cx(BLOCKS.mcu),BLOCKS.mcu.y+56);
+  if(activePhase>=2){
+    ctx.fillStyle=activePhase>=1?'#ffdddd':'#ccc';
+    ctx.fillText('Eff='+effVal,cx(BLOCKS.mcu),BLOCKS.mcu.y+72);
+  }
+
+  const actF=activePhase>=3?RED:LRED;
+  drawBlock(BLOCKS.l293, actF, RED, activePhase>=3?'#fff':'#A00C24', activePhase>=3?'#ffcccc':'#C8102E');
+  drawBlock(BLOCKS.motors,actF, RED, activePhase>=3?'#fff':'#A00C24', activePhase>=3?'#ffcccc':'#C8102E');
+  drawBlock(BLOCKS.pump, pumpOn?RED:LRED, RED, pumpOn?'#fff':'#A00C24', pumpOn?'#ffcccc':'#C8102E');
+
+  drawArrow(right(BLOCKS.batt),cy(BLOCKS.batt), BLOCKS.mcu.x-4, 140, RED);
+  drawArrow(right(BLOCKS.ina), cy(BLOCKS.ina),  BLOCKS.mcu.x, 145, RED);
+  drawArrow(right(BLOCKS.mlx), cy(BLOCKS.mlx),  BLOCKS.mcu.x, 162, RED);
+  drawArrow(right(BLOCKS.bh),  cy(BLOCKS.bh),   BLOCKS.mcu.x, 179, RED);
+  drawArrow(right(BLOCKS.tcrt),cy(BLOCKS.tcrt),  BLOCKS.mcu.x, 196, RED);
+  drawArrow(right(BLOCKS.edge),cy(BLOCKS.edge), BLOCKS.mcu.x, 210, RED);
+  drawArrow(right(BLOCKS.mcu), 140, BLOCKS.l293.x, cy(BLOCKS.l293), RED);
+  drawArrow(cx(BLOCKS.l293),   bottom(BLOCKS.l293), cx(BLOCKS.motors), BLOCKS.motors.y, RED);
+  drawArrow(right(BLOCKS.mcu), 180, BLOCKS.pump.x, cy(BLOCKS.pump), RED);
+  drawArrow(cx(BLOCKS.mcu),    bottom(BLOCKS.mcu), cx(BLOCKS.panel), BLOCKS.panel.y-22, RED);
+
+  drawZones();
+
+  PULSES.forEach((p,i)=>{
+    const px2=lerp(p.fx,p.tx,p.t);
+    const py2=lerp(p.fy,p.ty,p.t);
+    ctx.fillStyle=p.color;
+    ctx.beginPath();ctx.arc(px2,py2,4,0,Math.PI*2);ctx.fill();
+    if(p.label){
+      ctx.fillStyle=DRED;ctx.font='9px sans-serif';ctx.textAlign='center';
+      ctx.fillText(p.label,px2,py2-8);
+    }
+  });
+
+  ctx.fillStyle='#FCEAEA';ctx.fillRect(0,H-18,W,18);
+  ctx.fillStyle=RED;ctx.font='9px sans-serif';ctx.textAlign='center';
+  ctx.fillText('I2C: SDA=A4 · SCL=A5 · INA219(0x40) · MLX90614(0x5A) · BH1750(0x23) · Analog: TCRT(A0) · LDR(A2) · Digital: EDGE(D2,D3) · PUMP(D8)',W/2,H-6);
+}
+
+function applyFrame(f){
+  let ev=null;
+  for(let i=TIMELINE.length-1;i>=0;i--){if(TIMELINE[i].f<=f){ev=TIMELINE[i];break;}}
+  if(!ev)return;
+
+  activePhase=ev.phase;
+  statusMsg=ev.msg;
+  document.getElementById('status-msg').textContent=ev.msg;
+
+  for(let i=0;i<=6;i++){
+    document.getElementById('ph'+i).classList.toggle('active',i===ev.phase);
+  }
+
+  switch(ev.act){
+    case 'boot':
+      effVal='—';vVal='—';iVal='—';tVal='—';zVal='—';pumpOn=false;
+      zoneColors=Array(6).fill('#fff');robotX=0;break;
+    case 'health':
+      effVal='—';vVal='12.1V';iVal='42mA';tVal='+0°C';
+      addPulse(BLOCKS.ina,BLOCKS.mcu,RED,'V/I');
+      addPulse(BLOCKS.mlx,BLOCKS.mcu,RED,'T');break;
+    case 'p1':
+      effVal='71%';vVal='15.2V';iVal='568mA';
+      addPulse(BLOCKS.ina,BLOCKS.mcu,RED,'Eff');break;
+    case 'p1done':
+      effVal='71%';break;
+    case 'sweep0': case 'sweep1': case 'sweep2':
+    case 'sweep3': case 'sweep4': case 'sweep5':{
+      const z=parseInt(ev.act.replace('sweep',''));
+      zVal=''+z;robotX=z*ZONE_W+ZONE_W/2-10;
+      zoneColors[z]=ZONE_COLORS_INIT[z];
+      effVal=ZONE_EFF[z]+'%';
+      addPulse(BLOCKS.ina,BLOCKS.mcu,RED,'Eff');
+      addPulse(BLOCKS.tcrt,BLOCKS.mcu,'#D85A30','ref');
+      break;}
+    case 'postdry': effVal='79%';pumpOn=false;break;
+    case 'wet2':
+      pumpOn=true;robotX=2*ZONE_W+ZONE_W/2-10;zVal='2';effVal='61%';
+      addPulse(BLOCKS.pump,BLOCKS.mcu,'#1D9E75','flow');break;
+    case 'wet2done':
+      pumpOn=false;effVal='72%';
+      zoneColors[2]=ZONE_COLORS_FINAL[2];
+      addPulse(BLOCKS.ina,BLOCKS.mcu,RED,'recheck');break;
+    case 'diag':
+      tVal='+11°C';
+      addPulse(BLOCKS.mlx,BLOCKS.mcu,'#D85A30','HOT');break;
+    case 'diagdone':
+      tVal='+11°C — DEAD';zoneColors[2]='#FCEBEB';break;
+    case 'wet4':
+      pumpOn=true;robotX=4*ZONE_W+ZONE_W/2-10;zVal='4';effVal='77%';
+      addPulse(BLOCKS.pump,BLOCKS.mcu,'#1D9E75','flow');break;
+    case 'wet4done':
+      pumpOn=false;effVal='91%';zoneColors[4]='#EAF3DE';
+      addPulse(BLOCKS.ina,BLOCKS.mcu,RED,'clean');break;
+    case 'done':
+      pumpOn=false;statusMsg='All zones resolved. Robot idle.';break;
+  }
+
+  document.getElementById('m-eff').textContent=effVal;
+  document.getElementById('m-v').textContent=vVal;
+  document.getElementById('m-i').textContent=iVal;
+  document.getElementById('m-t').textContent=tVal;
+  document.getElementById('m-z').textContent=zVal;
+  document.getElementById('m-p').textContent=pumpOn?'ON':'OFF';
+  document.getElementById('m-p').style.color=pumpOn?'#1D9E75':RED;
+  document.getElementById('frame-ctr').textContent='Frame '+f+'/410';
+}
+
+function tick(){
+  frame++;
+  PULSES.forEach(p=>{p.t=Math.min(1,p.t+0.06);});
+  for(let i=PULSES.length-1;i>=0;i--){if(PULSES[i].t>=1)PULSES.splice(i,1);}
+  applyFrame(frame);
+  draw();
+  if(frame>=410){clearInterval(timer);playing=false;document.getElementById('btn-play').textContent='Play';}
+}
+
+function playPause(){
+  if(playing){clearInterval(timer);playing=false;document.getElementById('btn-play').textContent='Play';}
+  else{playing=true;document.getElementById('btn-play').textContent='Pause';
+    timer=setInterval(tick,getSpeed());}
+}
+
+function resetSim(){
+  clearInterval(timer);playing=false;frame=0;PULSES.length=0;
+  effVal='—';vVal='—';iVal='—';tVal='—';zVal='—';pumpOn=false;
+  statusMsg='Send START to begin';robotX=0;activePhase=0;
+  zoneColors=Array(6).fill('#fff');
+  applyFrame(0);draw();
+  document.getElementById('btn-play').textContent='Play';
+  document.getElementById('status-msg').textContent=statusMsg;
+  document.getElementById('frame-ctr').textContent='';
+  for(let i=0;i<=6;i++)document.getElementById('ph'+i).classList.toggle('active',i===0);
+}
+
+applyFrame(0);draw();
+</script>
